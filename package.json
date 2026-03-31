@@ -4,12 +4,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "tsx index.ts",
     "dev": "tsx index.ts",
-    "build": "tsc",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:stop": "pm2 stop plutoploy",
     "pm2:restart": "pm2 restart plutoploy",
+    "pm2:reload": "pm2 delete plutoploy 2>/dev/null || true && pm2 start ecosystem.config.cjs",
     "pm2:logs": "pm2 logs plutoploy",
     "pm2:delete": "pm2 delete plutoploy"
   },
