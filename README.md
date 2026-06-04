@@ -1,90 +1,318 @@
 # Plutoploy
 
-A self-hosted deployment platform for containerized applications with automatic HTTPS via Caddy and SQLite-based dynamic routing.
+A container deployment platform backend built with [Hono](https://hono.dev) + [Bun](https://bun.sh), wrapping [Podman](https://podman.io) via [`@pratyay360/podman-ts`](https://mintlify.wiki/Pratyay360/podman-ts).
 
-## Features
+## Prerequisites
 
-- 🐳 Podman container management
-- 🔄 SQLite-based dynamic routing (no Caddy reloads!)
-- 🔒 Automatic HTTPS with Cloudflare DNS-01
-- 📦 GHCR/Docker Hub image support
-- 💾 Persistent deployment storage
-- 🚀 Zero-downtime routing updates
-
-## Tech Stack
-
-- **Runtime**: Node.js with tsx
-- **Framework**: Hono
-- **Container Runtime**: Podman (rootless)
-- **Reverse Proxy**: Caddy with SQLite router
-- **Database**: SQLite (better-sqlite3)
-- **Process Manager**: PM2
+- [Bun](https://bun.sh) (latest)
+- [Podman](https://podman.io) with the socket enabled:
+  ```bash
+  systemctl --user enable --now podman.socket
+  ```
 
 ## Quick Start
 
-### Prerequisites
-
-- Node.js v20+
-- Podman (rootless mode)
-- PM2 (optional, for production)
-
-### Installation
-
 ```bash
 # Install dependencies
-npm install
+bun install
 
-# Create environment file
-cp .env.example .env
+# Run dev server (hot-reload on port 3000)
+bun run dev
 
-# Edit .env with your settings
-nano .env
+# Build standalone binary
+bun run build
 
-# Start development server
-npm run dev
-
-# Or use PM2 for production
-npm run pm2:start
+# Run the built binary
+bun run start
 ```
 
-## Development
+## Production (systemd)
 
 ```bash
-# Start server
-npm run dev
+# Build the binary
+bun run build
 
-# View logs (PM2)
-npm run pm2:logs
+# Copy binary and service file
+cp plutoploy ~/.local/bin/
+cp plutoploy.service ~/.local/share/systemd/user/
 
-# Restart (PM2)
-npm run pm2:restart
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now plutoploy.service
 ```
 
-## Deployment
+---
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for Oracle Cloud deployment instructions.
+## API Reference
 
-## API Endpoints
+Base URL: `http://localhost:3000`
 
-- `POST /api/deploy` - Deploy a new container
-- `GET /api/deployments` - List all deployments
-- `GET /api/deployments/:id` - Get deployment details
-- `DELETE /api/deployments/:id` - Remove deployment
-- `GET /api/routes` - View Caddy routes
+### General
 
-See [API.md](./API.md) for detailed API documentation.
+#### `GET /`
 
-## Architecture
+Returns API status info.
 
-```
-GitHub Actions → GHCR → Plutoploy API → Podman → Caddy → Live Apps
-                              ↓
-                          SQLite DB
-                              ↑
-                          Caddy Router
+```bash
+curl http://localhost:3000/
 ```
 
-## License
+```json
+{
+  "message": "Deployment Platform API",
+  "status": "running",
+  "version": "1.0.0"
+}
+```
 
-MIT
+#### `GET /health`
 
+Health check endpoint.
+
+```bash
+curl http://localhost:3000/health
+```
+
+```json
+{ "status": "healthy" }
+```
+
+---
+
+### Image Management
+
+#### `POST /api/pull`
+
+Pull a container image from a registry.
+
+```bash
+curl -X POST http://localhost:3000/api/pull \
+  -H "Content-Type: application/json" \
+  -d '{"image": "docker.io/library/nginx", "tag": "latest"}'
+```
+
+| Field       | Type    | Required | Default  | Description                    |
+|-------------|---------|----------|----------|--------------------------------|
+| `image`     | string  | ✅       | —        | Full image name                |
+| `tag`       | string  | ❌       | `latest` | Image tag                      |
+| `tlsVerify` | boolean | ❌       | `true`   | Verify TLS when pulling        |
+
+#### `GET /api/images`
+
+List all local images.
+
+```bash
+curl http://localhost:3000/api/images
+```
+
+#### `GET /api/images/:name`
+
+Inspect a specific image by name or ID.
+
+```bash
+curl http://localhost:3000/api/images/nginx
+```
+
+#### `DELETE /api/images/:name`
+
+Remove an image by name or ID.
+
+```bash
+curl -X DELETE http://localhost:3000/api/images/nginx
+```
+
+---
+
+### Container Lifecycle
+
+#### `POST /api/deploy`
+
+Pull an image, create a container, and start it in one step.
+
+```bash
+curl -X POST http://localhost:3000/api/deploy \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image": "docker.io/library/nginx",
+    "name": "my-nginx",
+    "tag": "latest",
+    "portMappings": [{"hostPort": 8080, "containerPort": 80}],
+    "environment": {"MY_VAR": "hello"},
+    "labels": {"app": "web"}
+  }'
+```
+
+| Field          | Type     | Required | Default  | Description                        |
+|----------------|----------|----------|----------|------------------------------------|
+| `image`        | string   | ✅       | —        | Full image name                    |
+| `name`         | string   | ❌       | —        | Container name                     |
+| `tag`          | string   | ❌       | `latest` | Image tag                          |
+| `command`      | string[] | ❌       | —        | Override container command          |
+| `portMappings` | array    | ❌       | —        | Port mappings (`hostPort`, `containerPort`) |
+| `environment`  | object   | ❌       | —        | Environment variables              |
+| `labels`       | object   | ❌       | —        | Container labels                   |
+
+#### `GET /api/containers`
+
+List all containers (running and stopped).
+
+```bash
+curl http://localhost:3000/api/containers
+```
+
+#### `GET /api/containers/:id`
+
+Inspect a container by ID or name.
+
+```bash
+curl http://localhost:3000/api/containers/my-nginx
+```
+
+#### `GET /api/containers/:id/logs`
+
+Fetch container logs. Supports a `tail` query param (default: 100).
+
+```bash
+# Last 100 lines (default)
+curl http://localhost:3000/api/containers/my-nginx/logs
+
+# Last 50 lines
+curl http://localhost:3000/api/containers/my-nginx/logs?tail=50
+```
+
+| Query Param | Type   | Default | Description              |
+|-------------|--------|---------|--------------------------|
+| `tail`      | number | `100`   | Number of log lines      |
+
+#### `GET /api/containers/:id/stats`
+
+Get resource usage statistics for a container.
+
+```bash
+curl http://localhost:3000/api/containers/my-nginx/stats
+```
+
+#### `POST /api/containers/:id/start`
+
+Start a stopped container.
+
+```bash
+curl -X POST http://localhost:3000/api/containers/my-nginx/start
+```
+
+#### `POST /api/containers/:id/stop`
+
+Stop a running container.
+
+```bash
+curl -X POST http://localhost:3000/api/containers/my-nginx/stop
+```
+
+#### `POST /api/containers/:id/restart`
+
+Restart a container.
+
+```bash
+curl -X POST http://localhost:3000/api/containers/my-nginx/restart
+```
+
+#### `DELETE /api/containers/:id`
+
+Force-remove a container. Also cleans up any associated route mappings from the database.
+
+```bash
+curl -X DELETE http://localhost:3000/api/containers/my-nginx
+```
+
+---
+
+### Route Management
+
+Routes map incoming paths to containers. Stored in a local SQLite database (`routes.db`).
+
+#### `GET /api/routes`
+
+List all route-to-container mappings.
+
+```bash
+curl http://localhost:3000/api/routes
+```
+
+```json
+{
+  "routes": [
+    { "id": 1, "route": "/app", "container": "my-nginx", "port": 8080 }
+  ]
+}
+```
+
+#### `POST /api/routes`
+
+Add a new route mapping.
+
+```bash
+curl -X POST http://localhost:3000/api/routes \
+  -H "Content-Type: application/json" \
+  -d '{"route": "/app", "container": "my-nginx", "port": 8080}'
+```
+
+| Field       | Type   | Required | Description                  |
+|-------------|--------|----------|------------------------------|
+| `route`     | string | ✅       | URL path to map              |
+| `container` | string | ✅       | Container name or ID         |
+| `port`      | number | ✅       | Port the container listens on|
+
+#### `DELETE /api/routes/:id`
+
+Remove a route mapping by its ID.
+
+```bash
+curl -X DELETE http://localhost:3000/api/routes/1
+```
+
+---
+
+### System
+
+#### `GET /api/system/info`
+
+Get Podman system information.
+
+```bash
+curl http://localhost:3000/api/system/info
+```
+
+#### `POST /api/prune`
+
+Prune unused containers, images, and volumes.
+
+```bash
+curl -X POST http://localhost:3000/api/prune
+```
+
+---
+
+## Project Structure
+
+```
+├── index.ts                    # Entry point — Hono app, CORS, route mounting
+├── src/
+│   ├── handlers/
+│   │   └── db.ts               # SQLite database setup (routes table)
+│   └── routes/
+│       └── deployRoutes.ts     # All API route handlers
+├── package.json
+├── plutoploy.service           # systemd user service template
+├── routes.db                   # SQLite database (auto-created)
+└── tsconfig.json
+```
+
+## Scripts
+
+| Command          | Description                              |
+|------------------|------------------------------------------|
+| `bun run dev`    | Start dev server with hot reload         |
+| `bun run build`  | Compile to standalone Linux binary       |
+| `bun run start`  | Run the compiled binary                  |
+| `bun run lint`   | Lint with oxlint                         |
+| `bun run format` | Format with oxfmt                        |

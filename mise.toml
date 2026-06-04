@@ -1,0 +1,12 @@
+[tools]
+bun = "latest"
+node = "latest"
+
+[tasks]
+build = { run = "bun run build" }
+lint = { run = "bun run lint" }
+format = { run = "bun run format" }
+install = { run = "bun install" }
+
+[deps]
+bun = { auto = true }

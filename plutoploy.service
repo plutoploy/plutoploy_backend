@@ -1,0 +1,20 @@
+// this is just a template
+[Unit]
+Description=plutoploy
+After=network.target
+
+[Service]
+Type=
+ExecStart=%h/.local/bin/plutoploy
+Restart=on-failure
+RestartSec=5
+
+Environment=NODE_ENV=production
+Environment=PORT=3000
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

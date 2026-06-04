@@ -1,5 +1,0 @@
-services:
-  bun:
-    build: .
-    container_name: mdebzoti
-    restart: unless-stopped

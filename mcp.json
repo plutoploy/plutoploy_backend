@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "podman-ts Docs": {
+      "url": "https://gitmcp.io/Pratyay360/podman-ts"
+    },
+    "podman-ts": {
+      "url": "https://podman-api-mcp.vercel.app/mcp"
+    }
+  }
+}
