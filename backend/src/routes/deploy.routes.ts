@@ -40,16 +40,23 @@ deployRoutes.post('/deploy', async (c) => {
         console.log('Deploy endpoint hit');
         const body = await c.req.json();
         console.log('Request body:', body);
-        const { image, subdomain, repo } = body;
-        
+        const { image, subdomain, repo, containerPort } = body;
+
         // Validate input
         if (!image || !subdomain) {
             return c.json({ error: 'Missing required fields: image, subdomain' }, 400);
         }
-        
+
         // Validate subdomain format
         if (!/^[a-z0-9-]+$/.test(subdomain)) {
             return c.json({ error: 'Invalid subdomain format' }, 400);
+        }
+
+        // Validate optional container port (port the app listens on inside the container)
+        if (containerPort !== undefined) {
+            if (!Number.isInteger(containerPort) || containerPort < 1 || containerPort > 65535) {
+                return c.json({ error: 'Invalid containerPort: must be an integer 1-65535' }, 400);
+            }
         }
         
         // Check if subdomain is taken
@@ -68,7 +75,8 @@ deployRoutes.post('/deploy', async (c) => {
             deployId,
             subdomain,
             port,
-            imageName: image
+            imageName: image,
+            containerPort
         });
         
         // Store deployment in database
