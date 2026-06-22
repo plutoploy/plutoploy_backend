@@ -85,4 +85,9 @@ data/
 *.db
 *.db-shm
 *.db-wal
+<<<<<<< HEAD
 caddy.json
+=======
+caddy.json
+*.pem
+>>>>>>> 444e970 (up)

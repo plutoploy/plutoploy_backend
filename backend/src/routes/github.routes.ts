@@ -92,46 +92,79 @@ githubRoutes.get('/repos', requireAuth, async (c) => {
  */
 githubRoutes.post('/inject-workflow', requireAuth, async (c) => {
     const user = c.get('user');
-    const body = await c.req.json().catch(() => ({}));
-    const { repoFullName, runtime, branch } = body;
+
+    const body = await c.req.json().catch(() => null);
+
+    if (!body) {
+        return c.json({ error: 'Invalid request body' }, 400);
+    }
+
+    const {
+        repoFullName,
+        runtime,
+        branch
+    } = body;
 
     if (!repoFullName || !runtime || !branch) {
-        return c.json({ error: 'Missing required fields: repoFullName, runtime, branch' }, 400);
+        return c.json({
+            error: 'Missing required fields: repoFullName, runtime, branch'
+        }, 400);
     }
 
-    if (runtime !== 'node' && runtime !== 'python') {
-        return c.json({ error: 'Invalid runtime. Must be "node" or "python"' }, 400);
+    if (!['node', 'python'].includes(runtime)) {
+        return c.json({
+            error: 'Invalid runtime. Must be "node" or "python"'
+        }, 400);
     }
 
-    // 1. Look up their installation_id
     const installationId = authDb.getUserInstallationId(user.id);
 
     if (!installationId) {
-        return c.json({ error: 'GitHub App not installed' }, 403);
+        return c.json({
+            error: 'GitHub App not installed'
+        }, 403);
     }
 
     try {
-        // 2. Generate installation token
-        const installationToken = await generateInstallationToken(installationId);
+        const installationToken =
+            await generateInstallationToken(installationId);
 
-        // 3. Inject workflow
-        await injectWorkflowToRepo(repoFullName, runtime as 'node' | 'python', branch, installationToken);
+        await injectWorkflowToRepo(
+            repoFullName,
+            runtime as 'node' | 'python',
+            branch,
+            installationToken
+        );
 
-        // 4. Create build record
         const buildId = randomUUID();
+
         buildsDb.create({
             id: buildId,
             repo: repoFullName,
-            branch: branch
+            branch
         });
 
-        return c.json({ success: true, message: 'Workflow injected successfully', buildId });
-    } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Failed to inject workflow';
-        console.error('[GitHub Routes] /inject-workflow error:', err);
-        return c.json({ error: message }, 500);
+        return c.json({
+            success: true,
+            message: 'Workflow injected successfully',
+            buildId
+        });
+    } catch (error) {
+        console.error(
+            '[GitHub Routes] /inject-workflow error:',
+            error
+        );
+
+        return c.json({
+            error:
+                error instanceof Error
+                    ? error.message
+                    : 'Failed to inject workflow'
+        }, 500);
     }
+
 });
+
 
 /**
  * GET /builds/:id/logs
@@ -140,124 +173,100 @@ githubRoutes.post('/inject-workflow', requireAuth, async (c) => {
 githubRoutes.get('/builds/:id/logs', requireAuth, async (c) => {
     const user = c.get('user');
     const buildId = c.req.param('id');
-    
+
+
     const build = buildsDb.getById(buildId) as any;
-    if (!build) return c.json({ error: 'Build not found' }, 404);
 
-    const installationId = authDb.getUserInstallationId(user.id);
-    if (!installationId) return c.json({ error: 'GitHub App not installed' }, 403);
+    if (!build) {
+        return c.json({
+            error: 'Build not found'
+        }, 404);
+    }
 
-    const installationToken = await generateInstallationToken(installationId);
+    // Important: make sure build belongs to user
+    if (build.user_id && build.user_id !== user.id) {
+        return c.json({
+            error: 'Unauthorized'
+        }, 403);
+    }
 
     return streamSSE(c, async (stream) => {
-        let lastLogLine = 0;
-        let isCompleted = false;
-        
-        // Initial message
-        await stream.writeSSE({ data: 'Initializing build process...' });
+        const startTime = Date.now();
+        const timeoutMs = 10 * 60 * 1000; // 10 minutes
 
-        while (!isCompleted) {
+        let lastStatus = '';
+        let lastRunId = '';
+
+        await stream.writeSSE({
+            data: 'Build initialized...'
+        });
+
+        while (true) {
             const currentBuild = buildsDb.getById(buildId) as any;
-            
+
             if (!currentBuild) {
-                await stream.writeSSE({ data: 'Build record lost.' });
+                await stream.writeSSE({
+                    data: 'Build record not found.'
+                });
                 break;
             }
 
-            if (currentBuild.status === 'success' || currentBuild.status === 'failure') {
-                isCompleted = true;
-            }
-
-            if (!currentBuild.github_run_id) {
-                await stream.writeSSE({ data: 'Waiting for GitHub Action to start...' });
-                
-                try {
-                    // Fallback: Check if there's a recent workflow run for this repo
-                    const runsRes = await fetch(`https://api.github.com/repos/${build.repo}/actions/runs?per_page=1`, {
-                        headers: {
-                            Authorization: `Bearer ${installationToken}`,
-                            Accept: 'application/vnd.github+json',
-                            'User-Agent': 'Plutoploy/1.0',
-                        }
-                    });
-                    if (runsRes.ok) {
-                        const runsData = await runsRes.json() as any;
-                        if (runsData.workflow_runs && runsData.workflow_runs.length > 0) {
-                            const latestRun = runsData.workflow_runs[0];
-                            // Only attach if it started near or after our build was created
-                            const buildTime = new Date(currentBuild.created_at).getTime();
-                            const runTime = new Date(latestRun.created_at).getTime();
-                            
-                            if (runTime >= buildTime - 60000) {
-                                buildsDb.updateState(buildId, 'in_progress', String(latestRun.id));
-                                currentBuild.github_run_id = String(latestRun.id);
-                                await stream.writeSSE({ data: `Found GitHub Action Run: ${latestRun.id}` });
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.error('[SSE Logs] Error fetching latest runs:', e);
-                }
-
-                if (!currentBuild.github_run_id) {
-                    await stream.sleep(2000);
-                    continue;
-                }
-            }
-
-            try {
-                // 1. Get jobs for run
-                const jobsRes = await fetch(`https://api.github.com/repos/${build.repo}/actions/runs/${currentBuild.github_run_id}/jobs`, {
-                    headers: {
-                        Authorization: `Bearer ${installationToken}`,
-                        Accept: 'application/vnd.github+json',
-                        'User-Agent': 'Plutoploy/1.0',
-                    }
+            if (Date.now() - startTime > timeoutMs) {
+                await stream.writeSSE({
+                    data: 'Build monitoring timed out.'
                 });
-                
-                if (jobsRes.ok) {
-                    const jobsData = await jobsRes.json() as any;
-                    if (jobsData.jobs && jobsData.jobs.length > 0) {
-                        const jobId = jobsData.jobs[0].id;
-                        
-                        // 2. Fetch logs for job
-                        const logsRes = await fetch(`https://api.github.com/repos/${build.repo}/actions/jobs/${jobId}/logs`, {
-                            headers: {
-                                Authorization: `Bearer ${installationToken}`,
-                                Accept: 'application/vnd.github+json',
-                                'User-Agent': 'Plutoploy/1.0',
-                            }
-                        });
-                        
-                        if (logsRes.ok) {
-                            const text = await logsRes.text();
-                            const lines = text.split('\n');
-                            
-                            for (let i = lastLogLine; i < lines.length; i++) {
-                                // Ignore empty lines to prevent spam
-                                if (lines[i].trim()) {
-                                    await stream.writeSSE({ data: lines[i] });
-                                }
-                            }
-                            lastLogLine = lines.length;
-                        } else if (logsRes.status !== 404) {
-                            await stream.writeSSE({ data: `Fetching logs... (Status: ${currentBuild.status})` });
-                        }
-                    }
-                }
-            } catch (err) {
-                console.error('[SSE Logs] Error fetching logs:', err);
+                break;
             }
 
-            if (!isCompleted) {
-                await stream.sleep(3000);
+            if (
+                currentBuild.github_run_id &&
+                currentBuild.github_run_id !== lastRunId
+            ) {
+                lastRunId = currentBuild.github_run_id;
+
+                await stream.writeSSE({
+                    data: `GitHub Action started (${lastRunId})`
+                });
             }
+
+            if (
+                currentBuild.status &&
+                currentBuild.status !== lastStatus
+            ) {
+                lastStatus = currentBuild.status;
+
+                switch (currentBuild.status) {
+                    case 'pending':
+                        await stream.writeSSE({
+                            data: 'Waiting for GitHub Actions...'
+                        });
+                        break;
+
+                    case 'in_progress':
+                        await stream.writeSSE({
+                            data: 'Build in progress...'
+                        });
+                        break;
+
+                    case 'success':
+                        await stream.writeSSE({
+                            data: 'Build completed successfully.'
+                        });
+                        return;
+
+                    case 'failure':
+                        await stream.writeSSE({
+                            data: 'Build failed.'
+                        });
+                        return;
+                }
+            }
+
+            await stream.sleep(1000);
         }
-        
-        const finalBuild = buildsDb.getById(buildId) as any;
-        const finalStatus = finalBuild?.status === 'success' ? 'SUCCESS' : 'FAILED';
-        await stream.writeSSE({ data: `--- BUILD ${finalStatus} ---` });
     });
+
 });
+
 
 export { githubRoutes };
