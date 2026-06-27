@@ -8,8 +8,14 @@ import { webhookRoutes } from "./src/routes/webhook.routes";
 
 const app = new Hono();
 
-// Enable CORS
-app.use("/*", cors());
+// Enable CORS — echo the request origin (wildcard is rejected when credentials: 'include')
+// ponytail: reflects any origin for testing. Pin to an allowlist before prod.
+app.use("/*", cors({
+  origin: (o) => o,            // Hono: a function reflects the incoming Origin back
+  credentials: true,
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+}));
 
 // Health check endpoints
 app.get("/", (c) => {
@@ -49,12 +55,6 @@ export function startServer() {
   process.stdout.write(''); // Flush stdout
 
   const server = serve({ fetch: app.fetch, port }, (info) => {
-    console.log(`🚀 Deployment API running on port ${info.port}`);
-    console.log(`📍 Endpoints:`);
-    console.log(`   POST   /api/deploy`);
-    console.log(`   GET    /api/deployments`);
-    console.log(`   GET    /api/deployments/:id`);
-    console.log(`   DELETE /api/deployments/:id`);
     process.stdout.write(''); // Flush stdout
   });
 
