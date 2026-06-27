@@ -7,7 +7,7 @@ import { randomUUID, createHmac } from 'crypto';
  * Find next available port from database
  */
 async function findAvailablePort(): Promise<number> {
-    const usedPorts = new Set(deploymentDb.getUsedPorts());
+    const usedPorts = new Set(await deploymentDb.getUsedPorts());
     let port = 3001;
     
     // Check if port is actually in use by checking with lsof
@@ -63,7 +63,7 @@ webhookRoutes.post('/github', async (c) => {
         console.log(`[Webhook] workflow_run ${action} for ${repoFullName}`);
 
         // Find the latest build for this repo that might be associated with this run
-        const latestBuild = buildsDb.getLatestByRepo(repoFullName) as any;
+        const latestBuild = await buildsDb.getLatestByRepo(repoFullName) as any;
 
         if (!latestBuild) {
             console.log('[Webhook] No tracking build found for this repo. Ignoring.');
@@ -72,13 +72,13 @@ webhookRoutes.post('/github', async (c) => {
 
         if (action === 'requested' || action === 'in_progress') {
             // Update the build with the GitHub run ID so we can poll its logs later
-            buildsDb.updateState(latestBuild.id, 'in_progress', String(workflow_run.id));
+            await buildsDb.updateState(latestBuild.id, 'in_progress', String(workflow_run.id));
             console.log(`[Webhook] Linked build ${latestBuild.id} to GitHub run ${workflow_run.id}`);
         } else if (action === 'completed') {
             const conclusion = workflow_run.conclusion;
             
             if (conclusion === 'success') {
-                buildsDb.updateState(latestBuild.id, 'success');
+                await buildsDb.updateState(latestBuild.id, 'success');
                 console.log(`[Webhook] Build ${latestBuild.id} completed successfully. Starting deployment...`);
                 
                 // Extract image tag and trigger deployment
@@ -105,7 +105,7 @@ webhookRoutes.post('/github', async (c) => {
                     });
 
                     // Store deployment in database
-                    deploymentDb.create({
+                    await deploymentDb.create({
                         deployId,
                         subdomain,
                         port,
@@ -119,7 +119,7 @@ webhookRoutes.post('/github', async (c) => {
                     console.error('[Webhook] Deployment failed after build:', err);
                 }
             } else {
-                buildsDb.updateState(latestBuild.id, 'failure');
+                await buildsDb.updateState(latestBuild.id, 'failure');
                 console.log(`[Webhook] Build ${latestBuild.id} failed with conclusion: ${conclusion}`);
             }
         }

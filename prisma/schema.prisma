@@ -1,0 +1,77 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Deployment {
+  id          String   @id @default(uuid()) @map("deploy_id")
+  subdomain   String   @unique
+  port        Int
+  imageName   String   @map("image_name")
+  containerId String   @map("container_id")
+  repo        String?
+  login       String?
+  status      String   @default("running")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([port])
+  @@index([status])
+  @@map("deployments")
+}
+
+model Route {
+  domain String @id
+  host   String
+  port   Int
+
+  @@map("routes")
+}
+
+model Build {
+  id          String   @id
+  repo        String
+  branch      String
+  githubRunId String?  @map("github_run_id")
+  status      String   @default("queued")
+  subdomain   String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("builds")
+}
+
+model User {
+  id             Int       @id @default(autoincrement())
+  githubId       String    @unique @map("github_id")
+  login          String
+  name           String?
+  email          String?
+  avatarUrl      String?   @map("avatar_url")
+  accessToken    String?   @map("access_token")
+  installationId String?   @map("installation_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  sessions       Session[]
+
+  @@map("users")
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+  @@map("sessions")
+}

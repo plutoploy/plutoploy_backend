@@ -122,13 +122,12 @@ export async function generateInstallationToken(installationId: string): Promise
  */
 export async function getInstallationRepos(installationToken: string): Promise<GitHubRepo[]> {
     console.log('\n[GitHub App] ── Fetching Installation Repos ─────────────');
-    console.log("Installation Token: " + installationToken)
     const repos: GitHubRepo[] = [];
     let url: string | null = `${GITHUB_API_BASE}/installation/repositories?per_page=100`;
 
     // GitHub paginates using Link headers
     while (url) {
-        const response = await fetch(url, {
+        const response : any = await fetch(url, {
             headers: {
                 Authorization: `Bearer ${installationToken}`,
                 Accept: 'application/vnd.github+json',

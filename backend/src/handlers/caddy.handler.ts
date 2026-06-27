@@ -10,7 +10,7 @@ export const addCaddyRoute = async (deployId: string, subdomain: string, port: n
     const host = '127.0.0.1'; // localhost
     
     try {
-        routesDb.upsert(domain, host, port);
+        await routesDb.upsert(domain, host, port);
         console.log(`✅ Caddy route added: ${domain} -> ${host}:${port}`);
     } catch (error: any) {
         console.error('Failed to add Caddy route:', error.message);
@@ -25,7 +25,7 @@ export const removeCaddyRoute = async (subdomain: string) => {
     const domain = `${subdomain}.${process.env.DOMAIN || 'yourdomain.com'}`;
     
     try {
-        routesDb.delete(domain);
+        await routesDb.delete(domain);
         console.log(`✅ Caddy route removed: ${domain}`);
     } catch (error: any) {
         console.error('Failed to remove Caddy route:', error.message);
@@ -41,7 +41,7 @@ export const removeCaddyRoute = async (subdomain: string) => {
 
 export const removeDeployment = async (deployId : string) =>{
     const { deploymentDb } = await import('../db/database');
-    const deployment = deploymentDb.getById(deployId) as any;
+    const deployment = await deploymentDb.getById(deployId) as any;
     
     if (!deployment) {
         throw new Error('Deployment not found');

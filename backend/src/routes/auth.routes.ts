@@ -12,7 +12,7 @@ import { Hono }                      from 'hono';
 import { randomUUID }                from 'crypto';
 import { authDb }                    from '../db/database.ts';
 import type { AuthEnv }              from '../middleware/auth.middleware.ts';
-import { requireAuth, extractToken } from '../middleware/auth.middleware.ts';
+import { requireAuth, signToken } from '../middleware/auth.middleware.ts';
 import {
     buildAuthorizationUrl,
     exchangeCodeForToken,
@@ -98,7 +98,7 @@ authRoutes.get('/github/callback', async (c) => {
         const finalInstallationId = installation_id ?? fetchedInstallId;
 
         // 3. Upsert user in DB — include installation_id from GitHub App
-        const user = authDb.upsertUser({
+        const user = await authDb.upsertUser({
             githubId:       String(githubUser.id),
             login:          githubUser.login,
             name:           githubUser.name,
@@ -114,20 +114,16 @@ authRoutes.get('/github/callback', async (c) => {
 
         console.log('[auth] installation_id saved:', finalInstallationId ?? 'not provided/found');
 
-        // 4. Create a session token
-        const sessionToken = randomUUID();
-        const expiresAt    = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-        authDb.createSession(user.id, sessionToken, expiresAt);
+        // 4. Sign a JWT — login + id in payload, no DB session row needed
+        const token = signToken({ sub: user.id, login: user.login });
+        const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 
-        // 5. Purge any stale sessions (best-effort)
-        authDb.purgeExpiredSessions();
-
-        // 6. Respond — set HttpOnly cookie AND return JSON with token so SPAs can use either
+        // 5. Respond — set HttpOnly cookie AND return JSON with token so SPAs can use either
         const frontendUrl = process.env.FRONTEND_URL || '';
         const isProduction = process.env.NODE_ENV === 'production';
 
         const cookieFlags = [
-            `session_token=${encodeURIComponent(sessionToken)}`,
+            `session_token=${encodeURIComponent(token)}`,
             `HttpOnly`,
             `Path=/`,
             `Max-Age=${SESSION_TTL_MS / 1000}`,
@@ -137,26 +133,24 @@ authRoutes.get('/github/callback', async (c) => {
 
         c.header('Set-Cookie', cookieFlags);
 
-        // If FRONTEND_URL is set, redirect the browser back to the front end
         if (frontendUrl) {
             return c.redirect(
-                `${frontendUrl}?session_token=${encodeURIComponent(sessionToken)}`
+                `${frontendUrl}?session_token=${encodeURIComponent(token)}`
             );
         }
 
-        // Otherwise return JSON (useful when the API is consumed directly or from a mobile app)
         return c.json({
             success: true,
-            session_token: sessionToken,
+            session_token: token,
             expires_at: expiresAt,
             user: {
                 id:              user.id,
-                github_id:       user.github_id,
+                github_id:       user.githubId,
                 login:           user.login,
                 name:            user.name,
                 email:           user.email,
-                avatar_url:      user.avatar_url,
-                installation_id: user.installation_id,
+                avatar_url:      user.avatarUrl,
+                installation_id: user.installationId,
             },
         });
 
@@ -173,17 +167,19 @@ authRoutes.get('/github/callback', async (c) => {
  * Returns the profile of the currently authenticated user.
  * Requires a valid session token.
  */
-authRoutes.get('/me', requireAuth, (c) => {
-    const user = c.get('user');
+authRoutes.get('/me', requireAuth, async (c) => {
+    const { sub } = c.get('user');
+    const user = await authDb.getUserById(sub);
+    if (!user) return c.json({ error: 'User not found' }, 404);
     return c.json({
         user: {
             id:         user.id,
-            github_id:  user.github_id,
+            github_id:  user.githubId,
             login:      user.login,
             name:       user.name,
             email:      user.email,
-            avatar_url: user.avatar_url,
-            created_at: user.created_at,
+            avatar_url: user.avatarUrl,
+            created_at: user.createdAt,
         },
     });
 });
@@ -193,29 +189,8 @@ authRoutes.get('/me', requireAuth, (c) => {
  * Invalidates the current session token.
  */
 authRoutes.post('/logout', requireAuth, (c) => {
-    const token = extractToken(c);
-
-    if (token) {
-        authDb.deleteSession(token);
-    }
-
-    // Clear the cookie
     c.header('Set-Cookie', 'session_token=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
-
     return c.json({ success: true, message: 'Logged out successfully' });
-});
-
-/**
- * POST /api/auth/logout/all
- * Invalidates ALL sessions for the authenticated user (logout from every device).
- */
-authRoutes.post('/logout/all', requireAuth, (c) => {
-    const user = c.get('user');
-    authDb.deleteAllUserSessions(user.id);
-
-    c.header('Set-Cookie', 'session_token=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
-
-    return c.json({ success: true, message: 'Logged out from all devices' });
 });
 
 export { authRoutes };

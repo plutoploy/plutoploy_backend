@@ -3,14 +3,15 @@ import { deployApp } from '../services/deployment.service';
 import { removeDeployment } from '../handlers/caddy.handler';
 import { randomUUID } from 'crypto';
 import { deploymentDb, routesDb } from '../db/database';
+import { requireAuth, type AuthEnv } from '../middleware/auth.middleware';
 
-const deployRoutes = new Hono();
+const deployRoutes = new Hono<AuthEnv>();
 
 /**
  * Find next available port from database
  */
 async function findAvailablePort(): Promise<number> {
-    const usedPorts = new Set(deploymentDb.getUsedPorts());
+    const usedPorts = new Set(await deploymentDb.getUsedPorts());
     let port = 3001;
     
     // Check if port is actually in use by checking with lsof
@@ -35,8 +36,9 @@ async function findAvailablePort(): Promise<number> {
 /**
  * Deploy a new app
  */
-deployRoutes.post('/deploy', async (c) => {
+deployRoutes.post('/deploy', requireAuth, async (c) => {
     try {
+        const { login } = c.get('user');
         console.log('Deploy endpoint hit');
         const body = await c.req.json();
         console.log('Request body:', body);
@@ -60,7 +62,7 @@ deployRoutes.post('/deploy', async (c) => {
         }
         
         // Check if subdomain is taken
-        if (deploymentDb.subdomainExists(subdomain)) {
+        if (await deploymentDb.subdomainExists(subdomain)) {
             return c.json({ error: 'Subdomain already taken' }, 409);
         }
         
@@ -80,13 +82,14 @@ deployRoutes.post('/deploy', async (c) => {
         });
         
         // Store deployment in database
-        deploymentDb.create({
+        await deploymentDb.create({
             deployId,
             subdomain,
             port,
             imageName: image,
             containerId: result.containerId,
-            repo
+            repo,
+            login
         });
         
         const deployment = {
@@ -113,42 +116,45 @@ deployRoutes.post('/deploy', async (c) => {
 /**
  * List all deployments
  */
-deployRoutes.get('/deployments', (c) => {
-    const allDeployments = deploymentDb.getAll();
+deployRoutes.get('/deployments', requireAuth, async (c) => {
+    const { login } = c.get('user');
+    const deployments = await deploymentDb.getByLogin(login);
     return c.json({
-        deployments: allDeployments,
-        count: allDeployments.length
+        deployments,
+        count: deployments.length
     });
 });
 
 /**
- * Get single deployment
+ * Get single deployment (must belong to the requesting user)
  */
-deployRoutes.get('/deployments/:id', (c) => {
+deployRoutes.get('/deployments/:id', requireAuth, async (c) => {
+    const { login } = c.get('user');
     const deployId = c.req.param('id');
-    const deployment = deploymentDb.getById(deployId);
-    
-    if (!deployment) {
+    const deployment = await deploymentDb.getById(deployId);
+
+    if (!deployment || deployment.login !== login) {
         return c.json({ error: 'Deployment not found' }, 404);
     }
-    
+
     return c.json({ deployment });
 });
 
 /**
- * Delete a deployment
+ * Delete a deployment (must belong to the requesting user)
  */
-deployRoutes.delete('/deployments/:id', async (c) => {
+deployRoutes.delete('/deployments/:id', requireAuth, async (c) => {
+    const { login } = c.get('user');
     const deployId = c.req.param('id');
-    
-    const deployment = deploymentDb.getById(deployId);
-    if (!deployment) {
+
+    const deployment = await deploymentDb.getById(deployId);
+    if (!deployment || deployment.login !== login) {
         return c.json({ error: 'Deployment not found' }, 404);
     }
-    
+
     try {
         await removeDeployment(deployId);
-        deploymentDb.delete(deployId);
+        await deploymentDb.delete(deployId);
         
         return c.json({ 
             success: true,
@@ -165,9 +171,9 @@ deployRoutes.delete('/deployments/:id', async (c) => {
 /**
  * Get all Caddy routes (for debugging)
  */
-deployRoutes.get('/routes', (c) => {
+deployRoutes.get('/routes', async (c) => {
     try {
-        const routes = routesDb.getAll();
+        const routes = await routesDb.getAll();
         return c.json({
             routes,
             count: routes.length

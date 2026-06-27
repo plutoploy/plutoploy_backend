@@ -1,7 +1,10 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { createServer } from 'http';
+import { serve } from "@hono/node-server";
 import { deployRoutes } from "./src/routes/deploy.routes";
+import { authRoutes } from "./src/routes/auth.routes";
+import { githubRoutes } from "./src/routes/github.routes";
+import { webhookRoutes } from "./src/routes/webhook.routes";
 
 const app = new Hono();
 
@@ -44,53 +47,9 @@ const port = parseInt(process.env.PORT || '3000');
 export function startServer() {
   console.log('Initializing server...');
   process.stdout.write(''); // Flush stdout
-  const server = createServer(async (req, res) => {
-    try {
-      // Read body for POST/PUT/PATCH requests
-      let requestBody: Buffer | undefined;
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        requestBody = await new Promise<Buffer>((resolve) => {
-          const chunks: Buffer[] = [];
-          req.on('data', (chunk) => chunks.push(chunk));
-          req.on('end', () => resolve(Buffer.concat(chunks)));
-          req.on('error', () => resolve(Buffer.from('')));
-        });
-      }
-      const response = await app.fetch(
-        new Request(`http://localhost:${port}${req.url}`, {
-          method: req.method,
-          headers: req.headers as any,
-          body: requestBody
-        })
-      );
-      res.statusCode = response.status;
-      response.headers.forEach((value, key) => {
-        res.setHeader(key, value);
-      });
 
-      if (response.body) {
-        const reader = response.body.getReader();
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) res.write(value);
-          }
-        } finally {
-          res.end();
-        }
-      } else {
-        res.end();
-      }
-    } catch (error) {
-      console.error('Request error:', error);
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: 'Internal server error' }));
-    }
-  });
-  
-  server.listen(port, () => {
-    console.log(`🚀 Deployment API running on port ${port}`);
+  const server = serve({ fetch: app.fetch, port }, (info) => {
+    console.log(`🚀 Deployment API running on port ${info.port}`);
     console.log(`📍 Endpoints:`);
     console.log(`   POST   /api/deploy`);
     console.log(`   GET    /api/deployments`);
@@ -98,19 +57,15 @@ export function startServer() {
     console.log(`   DELETE /api/deployments/:id`);
     process.stdout.write(''); // Flush stdout
   });
+
   // Graceful shutdown
-  process.on('SIGINT', () => {
+  const shutdown = () => {
     console.log('\n👋 Shutting down gracefully...');
-    server.close(() => {
-      process.exit(0);
-    });
-  });
-  process.on('SIGTERM', () => {
-    console.log('\n👋 Shutting down gracefully...');
-    server.close(() => {
-      process.exit(0);
-    });
-  });
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
   return server;
 }
 

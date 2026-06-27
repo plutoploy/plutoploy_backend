@@ -12,25 +12,26 @@
     "pm2:restart": "pm2 restart plutoploy",
     "pm2:reload": "pm2 delete plutoploy 2>/dev/null || true && pm2 start ecosystem.config.cjs",
     "pm2:logs": "pm2 logs plutoploy",
-    "pm2:delete": "pm2 delete plutoploy"
+    "pm2:delete": "pm2 delete plutoploy",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.11",
-    "better-sqlite3": "^11.0.0",
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
     "hono": "^4.11.9",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.22.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.19.37",
+    "@types/pg": "^8.20.0",
+    "prisma": "^7.8.0",
     "tsx": "^4.21.0",
     "typescript": "^5.0.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild"
-    ]
   }
 }
