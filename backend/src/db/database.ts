@@ -1,46 +1,14 @@
-import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Prisma 7 requires a driver adapter; pg connects via DATABASE_URL.
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+export const prisma = new PrismaClient({ adapter });
 
-// Database file path
-const DB_PATH = process.env.DB_PATH || './data/plutoploy.db';
-
-// Ensure data directory exists
-const dbDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir, { recursive: true });
-}
-
-// Initialize database
-export const db = new Database(DB_PATH);
-
-// Enable WAL mode for better concurrency
-db.pragma('journal_mode = WAL');
-
-// Initialize schema
-const schemaPath = path.join(__dirname, 'schema.sql');
-const schema = fs.readFileSync(schemaPath, 'utf-8');
-db.exec(schema);
-
-// Safe migration: add installation_id to existing users tables
-try {
-    db.exec(`ALTER TABLE users ADD COLUMN installation_id TEXT`);
-    console.log('✅ Migration: added installation_id column to users');
-} catch {
-    // Column already exists — this is fine
-}
-
-console.log(`✅ Database initialized at ${DB_PATH}`);
+console.log('✅ Prisma client initialized (PostgreSQL)');
 
 // Deployment operations
 export const deploymentDb = {
-    /**
-     * Create a new deployment
-     */
     create: (deployment: {
         deployId: string;
         subdomain: string;
@@ -48,190 +16,96 @@ export const deploymentDb = {
         imageName: string;
         containerId: string;
         repo?: string;
-    }) => {
-        const now = new Date().toISOString();
-        const stmt = db.prepare(`
-            INSERT INTO deployments (deploy_id, subdomain, port, image_name, container_id, repo, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)
-        `);
-        
-        return stmt.run(
-            deployment.deployId,
-            deployment.subdomain,
-            deployment.port,
-            deployment.imageName,
-            deployment.containerId,
-            deployment.repo || null,
-            now,
-            now
-        );
+        login?: string;
+    }) =>
+        prisma.deployment.create({
+            data: {
+                id: deployment.deployId,
+                subdomain: deployment.subdomain,
+                port: deployment.port,
+                imageName: deployment.imageName,
+                containerId: deployment.containerId,
+                repo: deployment.repo ?? null,
+                login: deployment.login ?? null,
+                status: 'running',
+            },
+        }),
+
+    getById: (deployId: string) =>
+        prisma.deployment.findUnique({ where: { id: deployId } }),
+
+    getBySubdomain: (subdomain: string) =>
+        prisma.deployment.findUnique({ where: { subdomain } }),
+
+    getAll: () =>
+        prisma.deployment.findMany({ orderBy: { createdAt: 'desc' } }),
+
+    getByLogin: (login: string) =>
+        prisma.deployment.findMany({ where: { login }, orderBy: { createdAt: 'desc' } }),
+
+    updateStatus: (deployId: string, status: string) =>
+        prisma.deployment.update({ where: { id: deployId }, data: { status } }),
+
+    delete: (deployId: string) =>
+        prisma.deployment.delete({ where: { id: deployId } }),
+
+    getUsedPorts: async (): Promise<number[]> => {
+        const rows = await prisma.deployment.findMany({
+            select: { port: true },
+            orderBy: { port: 'asc' },
+        });
+        return rows.map((r) => r.port);
     },
 
-    /**
-     * Get deployment by ID
-     */
-    getById: (deployId: string) => {
-        const stmt = db.prepare('SELECT * FROM deployments WHERE deploy_id = ?');
-        return stmt.get(deployId);
-    },
-
-    /**
-     * Get deployment by subdomain
-     */
-    getBySubdomain: (subdomain: string) => {
-        const stmt = db.prepare('SELECT * FROM deployments WHERE subdomain = ?');
-        return stmt.get(subdomain);
-    },
-
-    /**
-     * Get all deployments
-     */
-    getAll: () => {
-        const stmt = db.prepare('SELECT * FROM deployments ORDER BY created_at DESC');
-        return stmt.all();
-    },
-
-    /**
-     * Update deployment status
-     */
-    updateStatus: (deployId: string, status: string) => {
-        const stmt = db.prepare(`
-            UPDATE deployments 
-            SET status = ?, updated_at = ? 
-            WHERE deploy_id = ?
-        `);
-        return stmt.run(status, new Date().toISOString(), deployId);
-    },
-
-    /**
-     * Delete deployment
-     */
-    delete: (deployId: string) => {
-        const stmt = db.prepare('DELETE FROM deployments WHERE deploy_id = ?');
-        return stmt.run(deployId);
-    },
-
-    /**
-     * Get all used ports
-     */
-    getUsedPorts: (): number[] => {
-        const stmt = db.prepare('SELECT port FROM deployments ORDER BY port');
-        const rows = stmt.all() as { port: number }[];
-        return rows.map(row => row.port);
-    },
-
-    /**
-     * Check if subdomain exists
-     */
-    subdomainExists: (subdomain: string): boolean => {
-        const stmt = db.prepare('SELECT 1 FROM deployments WHERE subdomain = ? LIMIT 1');
-        return stmt.get(subdomain) !== undefined;
-    }
+    subdomainExists: async (subdomain: string): Promise<boolean> =>
+        (await prisma.deployment.count({ where: { subdomain } })) > 0,
 };
 
 // Builds operations
 export const buildsDb = {
-    /**
-     * Create a new build
-     */
-    create: (build: {
-        id: string;
-        repo: string;
-        branch: string;
-        subdomain?: string;
-    }) => {
-        const now = new Date().toISOString();
-        const stmt = db.prepare(`
-            INSERT INTO builds (id, repo, branch, subdomain, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'queued', ?, ?)
-        `);
-        return stmt.run(
-            build.id,
-            build.repo,
-            build.branch,
-            build.subdomain || null,
-            now,
-            now
-        );
-    },
+    create: (build: { id: string; repo: string; branch: string; subdomain?: string }) =>
+        prisma.build.create({
+            data: {
+                id: build.id,
+                repo: build.repo,
+                branch: build.branch,
+                subdomain: build.subdomain ?? null,
+                status: 'queued',
+            },
+        }),
 
-    /**
-     * Get build by ID
-     */
-    getById: (id: string) => {
-        const stmt = db.prepare('SELECT * FROM builds WHERE id = ?');
-        return stmt.get(id);
-    },
+    getById: (id: string) => prisma.build.findUnique({ where: { id } }),
 
-    /**
-     * Get latest build by repo
-     */
-    getLatestByRepo: (repo: string) => {
-        const stmt = db.prepare('SELECT * FROM builds WHERE repo = ? ORDER BY created_at DESC LIMIT 1');
-        return stmt.get(repo);
-    },
+    getLatestByRepo: (repo: string) =>
+        prisma.build.findFirst({ where: { repo }, orderBy: { createdAt: 'desc' } }),
 
-    /**
-     * Update build status and run_id
-     */
-    updateState: (id: string, status: string, githubRunId?: string) => {
-        const now = new Date().toISOString();
-        if (githubRunId) {
-            const stmt = db.prepare('UPDATE builds SET status = ?, github_run_id = ?, updated_at = ? WHERE id = ?');
-            return stmt.run(status, githubRunId, now, id);
-        } else {
-            const stmt = db.prepare('UPDATE builds SET status = ?, updated_at = ? WHERE id = ?');
-            return stmt.run(status, now, id);
-        }
-    }
+    updateState: (id: string, status: string, githubRunId?: string) =>
+        prisma.build.update({
+            where: { id },
+            data: { status, ...(githubRunId ? { githubRunId } : {}) },
+        }),
 };
 
 // Caddy routes operations
 export const routesDb = {
-    /**
-     * Add or update a route for Caddy
-     */
-    upsert: (domain: string, host: string, port: number) => {
-        const stmt = db.prepare(`
-            INSERT INTO routes (domain, host, port)
-            VALUES (?, ?, ?)
-            ON CONFLICT(domain) DO UPDATE SET
-                host = excluded.host,
-                port = excluded.port
-        `);
-        return stmt.run(domain, host, port);
-    },
+    upsert: (domain: string, host: string, port: number) =>
+        prisma.route.upsert({
+            where: { domain },
+            create: { domain, host, port },
+            update: { host, port },
+        }),
 
-    /**
-     * Get route by domain
-     */
-    getByDomain: (domain: string) => {
-        const stmt = db.prepare('SELECT * FROM routes WHERE domain = ?');
-        return stmt.get(domain);
-    },
+    getByDomain: (domain: string) =>
+        prisma.route.findUnique({ where: { domain } }),
 
-    /**
-     * Get all routes
-     */
-    getAll: () => {
-        const stmt = db.prepare('SELECT * FROM routes ORDER BY domain');
-        return stmt.all();
-    },
+    getAll: () => prisma.route.findMany({ orderBy: { domain: 'asc' } }),
 
-    /**
-     * Delete route
-     */
-    delete: (domain: string) => {
-        const stmt = db.prepare('DELETE FROM routes WHERE domain = ?');
-        return stmt.run(domain);
-    }
+    delete: (domain: string) =>
+        prisma.route.delete({ where: { domain } }).catch(() => null), // tolerate missing row
 };
 
 // Auth / User operations
 export const authDb = {
-    /**
-     * Upsert a GitHub user (create or update on conflict)
-     */
     upsertUser: (user: {
         githubId: string;
         login: string;
@@ -241,159 +115,58 @@ export const authDb = {
         accessToken?: string;
         installationId?: string | null;
     }) => {
-        const now = new Date().toISOString();
-        const stmt = db.prepare(`
-            INSERT INTO users (github_id, login, name, email, avatar_url, access_token, installation_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(github_id) DO UPDATE SET
-                login           = excluded.login,
-                name            = excluded.name,
-                email           = excluded.email,
-                avatar_url      = excluded.avatar_url,
-                access_token    = excluded.access_token,
-                installation_id = excluded.installation_id,
-                updated_at      = excluded.updated_at
-        `);
-        stmt.run(
-            user.githubId,
-            user.login,
-            user.name ?? null,
-            user.email ?? null,
-            user.avatarUrl ?? null,
-            user.accessToken ?? null,
-            user.installationId ?? null,
-            now,
-            now
-        );
-        return authDb.getUserByGithubId(user.githubId);
+        const data = {
+            login: user.login,
+            name: user.name ?? null,
+            email: user.email ?? null,
+            avatarUrl: user.avatarUrl ?? null,
+            accessToken: user.accessToken ?? null,
+            installationId: user.installationId ?? null,
+        };
+        // ponytail: a plain OAuth re-login carries no installation_id; don't let it
+        // clobber a previously saved one. Only write installationId when present.
+        const { installationId, ...updateData } = data;
+        return prisma.user.upsert({
+            where: { githubId: user.githubId },
+            create: { githubId: user.githubId, ...data },
+            update: installationId ? data : updateData,
+        });
     },
 
-    /**
-     * Get a user's GitHub App installation ID
-     */
-    getUserInstallationId: (userId: number): string | null => {
-        const stmt = db.prepare('SELECT installation_id FROM users WHERE id = ?');
-        const row = stmt.get(userId) as { installation_id: string | null } | undefined;
-        return row?.installation_id ?? null;
+    setInstallationId: (userId: number, installationId: string) =>
+        prisma.user.update({ where: { id: userId }, data: { installationId } }),
+
+    getUserInstallationId: async (userId: number): Promise<string | null> => {
+        const row = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { installationId: true },
+        });
+        return row?.installationId ?? null;
     },
 
-    /**
-     * Find user by GitHub ID
-     */
-    getUserByGithubId: (githubId: string) => {
-        const stmt = db.prepare('SELECT * FROM users WHERE github_id = ?');
-        return stmt.get(githubId) as UserRow | undefined;
-    },
+    getUserByGithubId: (githubId: string) =>
+        prisma.user.findUnique({ where: { githubId } }),
 
-    /**
-     * Find user by internal ID
-     */
-    getUserById: (id: number) => {
-        const stmt = db.prepare('SELECT * FROM users WHERE id = ?');
-        return stmt.get(id) as UserRow | undefined;
-    },
+    getUserById: (id: number) => prisma.user.findUnique({ where: { id } }),
 
-    /**
-     * Create a new session token for a user
-     */
-    createSession: (userId: number, token: string, expiresAt: string) => {
-        const now = new Date().toISOString();
-        const stmt = db.prepare(`
-            INSERT INTO sessions (user_id, token, expires_at, created_at)
-            VALUES (?, ?, ?, ?)
-        `);
-        return stmt.run(userId, token, expiresAt, now);
-    },
-
-    /**
-     * Validate a session token — returns the user row if the session is valid
-     */
-    getSessionUser: (token: string) => {
-        const now = new Date().toISOString();
-
-        // ── DEBUG ──────────────────────────────────────────────────────────────
-        console.log('\n[DB] ── getSessionUser ───────────────────────────────');
-        console.log('[DB] Looking up token:', token);
-        console.log('[DB] Current time:    ', now);
-
-        // Check if the session row exists at all (ignoring expiry)
-        const rawSession = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
-        console.log('[DB] Raw session row: ', rawSession ?? 'NOT FOUND');
-
-        // Check all sessions in the table
-        const allSessions = db.prepare('SELECT token, user_id, expires_at FROM sessions').all();
-        console.log('[DB] All sessions in DB:', allSessions.length ? allSessions : 'EMPTY TABLE');
-
-        // Check all users
-        const allUsers = db.prepare('SELECT id, login, github_id FROM users').all();
-        console.log('[DB] All users in DB:  ', allUsers.length ? allUsers : 'EMPTY TABLE');
-        // ──────────────────────────────────────────────────────────────────────
-
-        const stmt = db.prepare(`
-            SELECT u.* FROM sessions s
-            JOIN users u ON u.id = s.user_id
-            WHERE s.token = ? AND s.expires_at > ?
-        `);
-        const result = stmt.get(token, now) as UserRow | undefined;
-
-        // ── DEBUG ──────────────────────────────────────────────────────────────
-        console.log('[DB] JOIN result:      ', result ? `✅ user "${result.login}"` : '❌ no match');
-        console.log('[DB] ─────────────────────────────────────────────────\n');
-        // ──────────────────────────────────────────────────────────────────────
-
-        return result;
-    },
-
-    /**
-     * Delete a specific session (logout)
-     */
-    deleteSession: (token: string) => {
-        const stmt = db.prepare('DELETE FROM sessions WHERE token = ?');
-        return stmt.run(token);
-    },
-
-    /**
-     * Delete all sessions for a user
-     */
-    deleteAllUserSessions: (userId: number) => {
-        const stmt = db.prepare('DELETE FROM sessions WHERE user_id = ?');
-        return stmt.run(userId);
-    },
-
-    /**
-     * Purge expired sessions (maintenance)
-     */
-    purgeExpiredSessions: () => {
-        const stmt = db.prepare('DELETE FROM sessions WHERE expires_at <= ?');
-        return stmt.run(new Date().toISOString());
-    }
+    // ponytail: auth is stateless JWT (see auth.middleware.ts) — no DB session rows.
+    // The `sessions` table + helpers were dead code; deleted. If you ever need
+    // revocable sessions / "log out everywhere", reintroduce them and switch
+    // requireAuth to a DB lookup.
 };
 
-// Type for returned user rows
-export interface UserRow {
-    id: number;
-    github_id: string;
-    login: string;
-    name: string | null;
-    email: string | null;
-    avatar_url: string | null;
-    access_token: string | null;
-    installation_id: string | null;
-    created_at: string;
-    updated_at: string;
-}
+// Type for returned user rows (Prisma camelCase)
+export type UserRow = NonNullable<Awaited<ReturnType<typeof authDb.getUserByGithubId>>>;
 
 // Graceful shutdown
-process.on('exit', () => {
-    db.close();
-});
-
-process.on('SIGINT', () => {
-    db.close();
+const shutdown = async () => {
+    await prisma.$disconnect();
+};
+process.on('SIGINT', async () => {
+    await shutdown();
     process.exit(0);
 });
-
-process.on('SIGTERM', () => {
-    db.close();
+process.on('SIGTERM', async () => {
+    await shutdown();
     process.exit(0);
 });

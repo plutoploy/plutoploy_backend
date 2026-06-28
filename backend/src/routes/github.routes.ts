@@ -22,15 +22,15 @@ const githubRoutes = new Hono<AuthEnv>();
  * Requires: session token (Authorization: Bearer <token> or cookie)
  */
 githubRoutes.get('/repos', requireAuth, async (c) => {
-    const user = c.get('user');
+    const { sub } = c.get('user');
 
-    // 1. Look up their installation_id
-    const installationId = authDb.getUserInstallationId(user.id);
-
+    // Repos come from the GitHub App installation (the repos the user granted at
+    // install time). Returns public + private together, each with a `private` flag.
+    const installationId = await authDb.getUserInstallationId(sub);
     if (!installationId) {
         return c.json({
             error: 'GitHub App not installed',
-            message: 'Please install the Plutoploy GitHub App on your account to grant repo access.',
+            message: 'Please install the Plutoploy GitHub App to grant repo access.',
             install_url: process.env.GITHUB_APP_LINK
                 ? `${process.env.GITHUB_APP_LINK}/installations/new`
                 : null,
@@ -38,10 +38,7 @@ githubRoutes.get('/repos', requireAuth, async (c) => {
     }
 
     try {
-        // 2. Generate a short-lived Installation Access Token
         const installationToken = await generateInstallationToken(installationId);
-
-        // 3. Fetch repos via the Installation API
         const repos = await getInstallationRepos(installationToken);
 
         // Helper to format relative time
@@ -65,10 +62,11 @@ githubRoutes.get('/repos', requireAuth, async (c) => {
             repos: repos.map(r => ({
                 id: String(r.id),
                 projectName: r.name,
-                description: r.description, // <-- ADDED THIS
+                description: r.description,
+                private: r.private,         // public/private — frontend separates on this
                 commitHash: 'N/A',          // Not deployed yet, so no commit hash available here directly
                 branch: r.default_branch,
-                status: 'success',          // Mocking 'success' for now, can be updated with real deploy status later
+                status: 'not_deployed',     // ponytail: no deploy yet → honest state. Frontend shows a "Deploy" button on this; real status joins from deployments table once builds exist.
                 duration: '-',              // Not applicable until deployed
                 timestamp: timeAgo(r.updated_at),
                 // Keeping some originals just in case
@@ -91,7 +89,7 @@ githubRoutes.get('/repos', requireAuth, async (c) => {
  * Body: { repoFullName: string, runtime: 'node' | 'python', branch: string }
  */
 githubRoutes.post('/inject-workflow', requireAuth, async (c) => {
-    const user = c.get('user');
+    const { sub } = c.get('user');
 
     const body = await c.req.json().catch(() => null);
 
@@ -117,7 +115,7 @@ githubRoutes.post('/inject-workflow', requireAuth, async (c) => {
         }, 400);
     }
 
-    const installationId = authDb.getUserInstallationId(user.id);
+    const installationId = await authDb.getUserInstallationId(sub);
 
     if (!installationId) {
         return c.json({
@@ -127,18 +125,18 @@ githubRoutes.post('/inject-workflow', requireAuth, async (c) => {
 
     try {
         const installationToken =
-            await generateInstallationToken(installationId);
+            await generateInstallationToken(installationId);//Why Generating tokes ?
 
         await injectWorkflowToRepo(
             repoFullName,
-            runtime as 'node' | 'python',
+            runtime as 'node' | 'python', // need to change here 
             branch,
             installationToken
         );
 
         const buildId = randomUUID();
 
-        buildsDb.create({
+        await buildsDb.create({
             id: buildId,
             repo: repoFullName,
             branch
@@ -168,102 +166,101 @@ githubRoutes.post('/inject-workflow', requireAuth, async (c) => {
 
 /**
  * GET /builds/:id/logs
- * Stream GitHub Action build logs to the frontend via SSE.
+ * Stream live GitHub Action build status to the frontend via SSE.
+ *
+ * Source: the external gh-bot/PartyKit server. It rebroadcasts GitHub webhook
+ * events on a room keyed by github username (= repo owner) at
+ * `${PARTYKIT_WS_URL}/party/<owner>`. One socket carries events for all of that
+ * user's running projects, so we filter by `channel` (= `<owner>/<repo>/run-...`)
+ * down to this build's repo. PartyKit has no replay — only events arriving after
+ * we connect are seen.
+ *
+ * ponytail: one WS per open SSE stream, no buffer/table. PartyKit has no replay
+ * and these are tiny status events, so a build_logs table would be dead weight.
+ * Upgrade path = a shared per-user WS manager + build_logs table, only if
+ * multi-viewer/replay becomes a real need.
  */
+const PARTYKIT_WS_URL =
+    process.env.PARTYKIT_WS_URL || 'wss://plutoploy-gh-bot.pratyay360.partykit.dev';
+
+/**
+ * Decide what to do with one raw PartyKit message for a given build repo.
+ * Pure (no I/O) so it's unit-testable without a socket. Returns null to ignore.
+ */
+export function interpretBuildEvent(raw: string, repo: string): null | {
+    forward: { event?: string; action?: string; job?: string; status?: string; conclusion?: string; url?: string; ts?: any };
+    done: boolean;
+    success: boolean;
+} {
+    let msg: any;
+    try { msg = JSON.parse(raw); } catch { return null; }
+
+    // Only events for this build's repo (channel = `<owner>/<repo>/run-...`)
+    if (!msg?.channel || !String(msg.channel).startsWith(repo)) return null;
+
+    const p = msg.payload ?? {};
+    // Only the whole run completing is terminal. A single job completing is just a
+    // step — a multi-job build emits several `workflow_job` completions before the
+    // run is done, and one run also emits both a job- and a run-completion.
+    const done = p.event === 'workflow_run' && p.action === 'completed';
+    return {
+        forward: {
+            event: p.event, action: p.action, job: p.jobName,
+            status: p.status, conclusion: p.conclusion, url: p.url, ts: p.timestamp,
+        },
+        done,
+        success: done && p.conclusion === 'success',
+    };
+}
+
 githubRoutes.get('/builds/:id/logs', requireAuth, async (c) => {
-    const user = c.get('user');
-    const buildId = c.req.param('id');
-
-
-    const build = buildsDb.getById(buildId) as any;
+    const { sub } = c.get('user');
+    const build = await buildsDb.getById(c.req.param('id')) as any;
 
     if (!build) {
-        return c.json({
-            error: 'Build not found'
-        }, 404);
+        return c.json({ error: 'Build not found' }, 404);
     }
 
-    // Important: make sure build belongs to user
-    if (build.user_id && build.user_id !== user.id) {
-        return c.json({
-            error: 'Unauthorized'
-        }, 403);
+    // Make sure the build belongs to the requesting user
+    if (build.user_id && build.user_id !== sub) {
+        return c.json({ error: 'Unauthorized' }, 403);
     }
+
+    const owner = String(build.repo).split('/')[0];      // party room = github username
+    const url = `${PARTYKIT_WS_URL}/party/${owner}`;
 
     return streamSSE(c, async (stream) => {
-        const startTime = Date.now();
-        const timeoutMs = 10 * 60 * 1000; // 10 minutes
+        const ws = new WebSocket(url);
+        let settle: () => void;
+        const done = new Promise<void>((res) => { settle = res; });
 
-        let lastStatus = '';
-        let lastRunId = '';
+        // Safety net: a stuck build must not pin the connection forever.
+        const timer = setTimeout(() => settle(), 10 * 60 * 1000);
 
-        await stream.writeSSE({
-            data: 'Build initialized...'
-        });
+        ws.onopen = () => {
+            void stream.writeSSE({ event: 'status', data: 'connected' });
+        };
 
-        while (true) {
-            const currentBuild = buildsDb.getById(buildId) as any;
+        ws.onmessage = async (ev) => {
+            const r = interpretBuildEvent(ev.data as string, build.repo);
+            if (!r) return;                              // not this build / unparseable
 
-            if (!currentBuild) {
-                await stream.writeSSE({
-                    data: 'Build record not found.'
-                });
-                break;
+            await stream.writeSSE({ event: 'build', data: JSON.stringify(r.forward) });
+
+            if (r.done) {                                // success/failure detection
+                await buildsDb.updateState(build.id, r.success ? 'success' : 'failure');
+                await stream.writeSSE({ event: 'done', data: r.forward.conclusion ?? 'unknown' });
+                settle();
             }
+        };
 
-            if (Date.now() - startTime > timeoutMs) {
-                await stream.writeSSE({
-                    data: 'Build monitoring timed out.'
-                });
-                break;
-            }
+        ws.onerror = () => settle();
+        ws.onclose = () => settle();
+        stream.onAbort(() => ws.close());                // frontend disconnected
 
-            if (
-                currentBuild.github_run_id &&
-                currentBuild.github_run_id !== lastRunId
-            ) {
-                lastRunId = currentBuild.github_run_id;
-
-                await stream.writeSSE({
-                    data: `GitHub Action started (${lastRunId})`
-                });
-            }
-
-            if (
-                currentBuild.status &&
-                currentBuild.status !== lastStatus
-            ) {
-                lastStatus = currentBuild.status;
-
-                switch (currentBuild.status) {
-                    case 'pending':
-                        await stream.writeSSE({
-                            data: 'Waiting for GitHub Actions...'
-                        });
-                        break;
-
-                    case 'in_progress':
-                        await stream.writeSSE({
-                            data: 'Build in progress...'
-                        });
-                        break;
-
-                    case 'success':
-                        await stream.writeSSE({
-                            data: 'Build completed successfully.'
-                        });
-                        return;
-
-                    case 'failure':
-                        await stream.writeSSE({
-                            data: 'Build failed.'
-                        });
-                        return;
-                }
-            }
-
-            await stream.sleep(1000);
-        }
+        await done;
+        clearTimeout(timer);
+        ws.close();
     });
 
 });

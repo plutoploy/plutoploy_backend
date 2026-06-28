@@ -4,21 +4,22 @@
  * GET  /api/auth/github              → Redirect user to GitHub authorize page
  * GET  /api/auth/github/callback     → Handle GitHub redirect, issue session token
  * GET  /api/auth/me                  → Return the current authenticated user
- * POST /api/auth/logout              → Invalidate the current session
- * POST /api/auth/logout/all          → Invalidate ALL sessions for this user
+ * POST /api/auth/logout              → Clear the session cookie (JWT stays valid until expiry)
+ *
+ * NOTE: auth is stateless JWT — there is no server-side session to "invalidate".
+ * Logout only clears the cookie; a copied token works until its 30-day expiry.
  */
 
 import { Hono }                      from 'hono';
 import { randomUUID }                from 'crypto';
 import { authDb }                    from '../db/database.ts';
 import type { AuthEnv }              from '../middleware/auth.middleware.ts';
-import { requireAuth, extractToken } from '../middleware/auth.middleware.ts';
+import { requireAuth, signToken } from '../middleware/auth.middleware.ts';
 import {
     buildAuthorizationUrl,
     exchangeCodeForToken,
     getGitHubUser,
     getGitHubUserEmail,
-    getUserAppInstallationId,
 } from '../services/github.service.ts';
 
 const authRoutes = new Hono<AuthEnv>();
@@ -88,17 +89,18 @@ authRoutes.get('/github/callback', async (c) => {
         // 1. Exchange code → access token
         const tokenData = await exchangeCodeForToken(code);
 
-        // 2. Fetch GitHub user profile & installations
-        const [githubUser, primaryEmail, fetchedInstallId] = await Promise.all([
+        // 2. Fetch GitHub user profile + email
+        const [githubUser, primaryEmail] = await Promise.all([
             getGitHubUser(tokenData.access_token),
             getGitHubUserEmail(tokenData.access_token),
-            getUserAppInstallationId(tokenData.access_token),
         ]);
 
-        const finalInstallationId = installation_id ?? fetchedInstallId;
+        // installation_id only arrives here if OAuth ran *during* install (query param).
+        // Otherwise it's captured later by the /github/setup redirect.
+        const finalInstallationId = installation_id ?? null;
 
         // 3. Upsert user in DB — include installation_id from GitHub App
-        const user = authDb.upsertUser({
+        const user = await authDb.upsertUser({
             githubId:       String(githubUser.id),
             login:          githubUser.login,
             name:           githubUser.name,
@@ -114,20 +116,16 @@ authRoutes.get('/github/callback', async (c) => {
 
         console.log('[auth] installation_id saved:', finalInstallationId ?? 'not provided/found');
 
-        // 4. Create a session token
-        const sessionToken = randomUUID();
-        const expiresAt    = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-        authDb.createSession(user.id, sessionToken, expiresAt);
+        // 4. Sign a JWT — login + id in payload, no DB session row needed
+        const token = signToken({ sub: user.id, login: user.login });
+        const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 
-        // 5. Purge any stale sessions (best-effort)
-        authDb.purgeExpiredSessions();
-
-        // 6. Respond — set HttpOnly cookie AND return JSON with token so SPAs can use either
+        // 5. Respond — set HttpOnly cookie AND return JSON with token so SPAs can use either
         const frontendUrl = process.env.FRONTEND_URL || '';
         const isProduction = process.env.NODE_ENV === 'production';
 
         const cookieFlags = [
-            `session_token=${encodeURIComponent(sessionToken)}`,
+            `session_token=${encodeURIComponent(token)}`,
             `HttpOnly`,
             `Path=/`,
             `Max-Age=${SESSION_TTL_MS / 1000}`,
@@ -137,26 +135,24 @@ authRoutes.get('/github/callback', async (c) => {
 
         c.header('Set-Cookie', cookieFlags);
 
-        // If FRONTEND_URL is set, redirect the browser back to the front end
         if (frontendUrl) {
             return c.redirect(
-                `${frontendUrl}?session_token=${encodeURIComponent(sessionToken)}`
+                `${frontendUrl}?session_token=${encodeURIComponent(token)}`
             );
         }
 
-        // Otherwise return JSON (useful when the API is consumed directly or from a mobile app)
         return c.json({
             success: true,
-            session_token: sessionToken,
+            session_token: token,
             expires_at: expiresAt,
             user: {
                 id:              user.id,
-                github_id:       user.github_id,
+                github_id:       user.githubId,
                 login:           user.login,
                 name:            user.name,
                 email:           user.email,
-                avatar_url:      user.avatar_url,
-                installation_id: user.installation_id,
+                avatar_url:      user.avatarUrl,
+                installation_id: user.installationId,
             },
         });
 
@@ -169,21 +165,45 @@ authRoutes.get('/github/callback', async (c) => {
 
 
 /**
+ * GET /api/auth/github/setup
+ * GitHub App "Setup URL" — GitHub redirects here after the user installs the App,
+ * with ?installation_id=<id>&setup_action=install. The browser still carries the
+ * session cookie, so we save the installation_id against the logged-in user. This
+ * is what makes /api/repos work when the user installs the App *after* logging in.
+ */
+authRoutes.get('/github/setup', requireAuth, async (c) => {
+    const { sub } = c.get('user');
+    const { installation_id } = c.req.query();
+
+    if (!installation_id) {
+        return c.json({ error: 'Missing installation_id' }, 400);
+    }
+
+    await authDb.setInstallationId(sub, installation_id);
+    console.log('[auth] installation_id saved post-install:', installation_id);
+
+    const frontendUrl = process.env.FRONTEND_URL;
+    return frontendUrl ? c.redirect(frontendUrl) : c.json({ success: true, installation_id });
+});
+
+/**
  * GET /api/auth/me
  * Returns the profile of the currently authenticated user.
  * Requires a valid session token.
  */
-authRoutes.get('/me', requireAuth, (c) => {
-    const user = c.get('user');
+authRoutes.get('/me', requireAuth, async (c) => {
+    const { sub } = c.get('user');
+    const user = await authDb.getUserById(sub);
+    if (!user) return c.json({ error: 'User not found' }, 404);
     return c.json({
         user: {
             id:         user.id,
-            github_id:  user.github_id,
+            github_id:  user.githubId,
             login:      user.login,
             name:       user.name,
             email:      user.email,
-            avatar_url: user.avatar_url,
-            created_at: user.created_at,
+            avatar_url: user.avatarUrl,
+            created_at: user.createdAt,
         },
     });
 });
@@ -193,29 +213,8 @@ authRoutes.get('/me', requireAuth, (c) => {
  * Invalidates the current session token.
  */
 authRoutes.post('/logout', requireAuth, (c) => {
-    const token = extractToken(c);
-
-    if (token) {
-        authDb.deleteSession(token);
-    }
-
-    // Clear the cookie
     c.header('Set-Cookie', 'session_token=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
-
     return c.json({ success: true, message: 'Logged out successfully' });
-});
-
-/**
- * POST /api/auth/logout/all
- * Invalidates ALL sessions for the authenticated user (logout from every device).
- */
-authRoutes.post('/logout/all', requireAuth, (c) => {
-    const user = c.get('user');
-    authDb.deleteAllUserSessions(user.id);
-
-    c.header('Set-Cookie', 'session_token=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
-
-    return c.json({ success: true, message: 'Logged out from all devices' });
 });
 
 export { authRoutes };

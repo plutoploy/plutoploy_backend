@@ -33,24 +33,6 @@ export const deployApp = async (config: DeploymentConfig) => {
         routeAdded = true;
 
         console.log(`✅ Deployment ${deployId} successful!`);
-        
-
-    try {
-        console.log(`Starting deployment ${deployId}...`);
-
-        // 1. Pull image from registry
-        console.log(`Pulling image: ${imageName}`);
-        await pullImage(imageName);
-
-        // 2. Create and start container
-        console.log(`Creating container on port ${port}`);
-        const containerId = await createAndStartContainer(port, imageName, deployId);
-
-        // 3. Add Caddy route via SQLite
-        console.log(`Adding Caddy route for ${subdomain}...`);
-        await addCaddyRoute(deployId, subdomain, port);
-
-        console.log(`✅ Deployment ${deployId} successful!`);
 
         return {
             success: true,
@@ -58,10 +40,8 @@ export const deployApp = async (config: DeploymentConfig) => {
             subdomain,
             port,
             url: `https://${subdomain}.${process.env.DOMAIN || 'yourdomain.com'}`,
-            containerId
+            containerId,
         };
-        
-
     } catch (error: any) {
         console.error(`❌ Deployment ${deployId} failed:`, error.message);
         await rollback(deployId, subdomain, { containerCreated, routeAdded });
@@ -74,7 +54,7 @@ export const deployApp = async (config: DeploymentConfig) => {
  * Best-effort: each step is independently guarded so one failure doesn't
  * block the rest of the cleanup.
  */
-const rollback = async (
+export const rollback = async (
     deployId: string,
     subdomain: string,
     state: { containerCreated: boolean; routeAdded: boolean }
