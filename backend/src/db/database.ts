@@ -123,12 +123,18 @@ export const authDb = {
             accessToken: user.accessToken ?? null,
             installationId: user.installationId ?? null,
         };
+        // ponytail: a plain OAuth re-login carries no installation_id; don't let it
+        // clobber a previously saved one. Only write installationId when present.
+        const { installationId, ...updateData } = data;
         return prisma.user.upsert({
             where: { githubId: user.githubId },
             create: { githubId: user.githubId, ...data },
-            update: data,
+            update: installationId ? data : updateData,
         });
     },
+
+    setInstallationId: (userId: number, installationId: string) =>
+        prisma.user.update({ where: { id: userId }, data: { installationId } }),
 
     getUserInstallationId: async (userId: number): Promise<string | null> => {
         const row = await prisma.user.findUnique({
@@ -143,28 +149,10 @@ export const authDb = {
 
     getUserById: (id: number) => prisma.user.findUnique({ where: { id } }),
 
-    createSession: (userId: number, token: string, expiresAt: string) =>
-        prisma.session.create({
-            data: { userId, token, expiresAt: new Date(expiresAt) },
-        }),
-
-    getSessionUser: async (token: string) => {
-        const session = await prisma.session.findUnique({
-            where: { token },
-            include: { user: true },
-        });
-        if (!session || session.expiresAt <= new Date()) return undefined;
-        return session.user;
-    },
-
-    deleteSession: (token: string) =>
-        prisma.session.delete({ where: { token } }).catch(() => null),
-
-    deleteAllUserSessions: (userId: number) =>
-        prisma.session.deleteMany({ where: { userId } }),
-
-    purgeExpiredSessions: () =>
-        prisma.session.deleteMany({ where: { expiresAt: { lte: new Date() } } }),
+    // ponytail: auth is stateless JWT (see auth.middleware.ts) — no DB session rows.
+    // The `sessions` table + helpers were dead code; deleted. If you ever need
+    // revocable sessions / "log out everywhere", reintroduce them and switch
+    // requireAuth to a DB lookup.
 };
 
 // Type for returned user rows (Prisma camelCase)

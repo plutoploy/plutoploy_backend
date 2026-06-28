@@ -1,8 +1,23 @@
 services:
-  bun:
+  backend:
     build: .
-    container_name: mdebzoti
+    container_name: plutoploy-backend
     restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override DB host to the compose service. node --env-file won't clobber an
+      # already-set var, so this beats DATABASE_URL in .env (which points at localhost).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-plutoploy}:${POSTGRES_PASSWORD:-plutoploy}@postgres:5432/${POSTGRES_DB:-plutoploy}?schema=public
+      # Pin the app's internal listen port to 3000 so it can't drift from the
+      # hardcoded ":3000" container side of the mapping below.
+      PORT: "3000"
+    # Host side = HOST_PORT (remap freely to dodge collisions); container side is
+    # always 3000.
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:17-alpine
@@ -13,9 +28,17 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plutoploy}
       POSTGRES_DB: ${POSTGRES_DB:-plutoploy}
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-plutoploy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     volumes:
       - pgdata:/var/lib/postgresql/data
 
 volumes:
   pgdata:
+    # ponytail: pin the name so it's NOT prefixed by the compose project/dir name.
+    # Otherwise renaming the dir spawns a fresh empty volume = apparent data loss.
+    name: plutoploy-backend_pgdata

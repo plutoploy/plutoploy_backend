@@ -66,7 +66,7 @@ githubRoutes.get('/repos', requireAuth, async (c) => {
                 private: r.private,         // public/private — frontend separates on this
                 commitHash: 'N/A',          // Not deployed yet, so no commit hash available here directly
                 branch: r.default_branch,
-                status: 'success',          // Mocking 'success' for now, can be updated with real deploy status later
+                status: 'not_deployed',     // ponytail: no deploy yet → honest state. Frontend shows a "Deploy" button on this; real status joins from deployments table once builds exist.
                 duration: '-',              // Not applicable until deployed
                 timestamp: timeAgo(r.updated_at),
                 // Keeping some originals just in case
@@ -125,7 +125,7 @@ githubRoutes.post('/inject-workflow', requireAuth, async (c) => {
 
     try {
         const installationToken =
-            await generateInstallationToken(installationId);
+            await generateInstallationToken(installationId);//Why Generating tokes ?
 
         await injectWorkflowToRepo(
             repoFullName,

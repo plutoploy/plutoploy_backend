@@ -4,8 +4,10 @@
  * GET  /api/auth/github              → Redirect user to GitHub authorize page
  * GET  /api/auth/github/callback     → Handle GitHub redirect, issue session token
  * GET  /api/auth/me                  → Return the current authenticated user
- * POST /api/auth/logout              → Invalidate the current session
- * POST /api/auth/logout/all          → Invalidate ALL sessions for this user
+ * POST /api/auth/logout              → Clear the session cookie (JWT stays valid until expiry)
+ *
+ * NOTE: auth is stateless JWT — there is no server-side session to "invalidate".
+ * Logout only clears the cookie; a copied token works until its 30-day expiry.
  */
 
 import { Hono }                      from 'hono';
@@ -18,7 +20,6 @@ import {
     exchangeCodeForToken,
     getGitHubUser,
     getGitHubUserEmail,
-    getUserAppInstallationId,
 } from '../services/github.service.ts';
 
 const authRoutes = new Hono<AuthEnv>();
@@ -88,14 +89,15 @@ authRoutes.get('/github/callback', async (c) => {
         // 1. Exchange code → access token
         const tokenData = await exchangeCodeForToken(code);
 
-        // 2. Fetch GitHub user profile & installations
-        const [githubUser, primaryEmail, fetchedInstallId] = await Promise.all([
+        // 2. Fetch GitHub user profile + email
+        const [githubUser, primaryEmail] = await Promise.all([
             getGitHubUser(tokenData.access_token),
             getGitHubUserEmail(tokenData.access_token),
-            getUserAppInstallationId(tokenData.access_token),
         ]);
 
-        const finalInstallationId = installation_id ?? fetchedInstallId;
+        // installation_id only arrives here if OAuth ran *during* install (query param).
+        // Otherwise it's captured later by the /github/setup redirect.
+        const finalInstallationId = installation_id ?? null;
 
         // 3. Upsert user in DB — include installation_id from GitHub App
         const user = await authDb.upsertUser({
@@ -161,6 +163,28 @@ authRoutes.get('/github/callback', async (c) => {
     }
 });
 
+
+/**
+ * GET /api/auth/github/setup
+ * GitHub App "Setup URL" — GitHub redirects here after the user installs the App,
+ * with ?installation_id=<id>&setup_action=install. The browser still carries the
+ * session cookie, so we save the installation_id against the logged-in user. This
+ * is what makes /api/repos work when the user installs the App *after* logging in.
+ */
+authRoutes.get('/github/setup', requireAuth, async (c) => {
+    const { sub } = c.get('user');
+    const { installation_id } = c.req.query();
+
+    if (!installation_id) {
+        return c.json({ error: 'Missing installation_id' }, 400);
+    }
+
+    await authDb.setInstallationId(sub, installation_id);
+    console.log('[auth] installation_id saved post-install:', installation_id);
+
+    const frontendUrl = process.env.FRONTEND_URL;
+    return frontendUrl ? c.redirect(frontendUrl) : c.json({ success: true, installation_id });
+});
 
 /**
  * GET /api/auth/me

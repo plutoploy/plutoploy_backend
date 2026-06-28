@@ -10,8 +10,12 @@ import { createSign } from 'crypto';
 const GITHUB_OAUTH_URL = 'https://github.com/login/oauth/access_token';
 const GITHUB_API_BASE = 'https://api.github.com';
 
-// Path to private key — placed in project root, gitignored via *.pem
-const PEM_PATH = path.resolve(process.cwd(), 'plutoply.2026-04-02.private-key.pem');
+// Path to private key — placed in project root, gitignored via *.pem.
+// Override with GITHUB_APP_PEM_PATH; falls back to the file in the repo root.
+const PEM_PATH = path.resolve(
+    process.cwd(),
+    process.env.GITHUB_APP_PEM_PATH || 'plutoploy-gh-bot.2026-06-28.private-key.pem',
+);
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,11 +85,22 @@ function createAppJwt(): string {
     return `${signing}.${signature}`;
 }
 
+// ponytail: in-memory token cache. GitHub installation tokens live 1h; reuse
+// until ~2min before expiry instead of minting one per request. Dies on restart
+// (fine — it just re-mints). Move to Redis only if you run multiple processes.
+const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+
 /**
  * Generate a short-lived Installation Access Token (valid 1 hour).
  * This token is used for all GitHub API calls on behalf of a user.
+ * Cached per installationId until ~2min before expiry.
  */
 export async function generateInstallationToken(installationId: string): Promise<string> {
+    const cached = tokenCache.get(installationId);
+    if (cached && cached.expiresAt - 120_000 > Date.now()) {
+        return cached.token;
+    }
+
     console.log('\n[GitHub App] ── Generating Installation Token ───────────');
     console.log('[GitHub App] Installation ID:', installationId);
 
@@ -114,6 +129,7 @@ export async function generateInstallationToken(installationId: string): Promise
     console.log('[GitHub App] Token generated, expires at:', data.expires_at);
     console.log('[GitHub App] ─────────────────────────────────────────────\n');
 
+    tokenCache.set(installationId, { token: data.token, expiresAt: new Date(data.expires_at).getTime() });
     return data.token;
 }
 
@@ -127,7 +143,7 @@ export async function getInstallationRepos(installationToken: string): Promise<G
 
     // GitHub paginates using Link headers
     while (url) {
-        const response : any = await fetch(url, {
+        const response : any = await ghFetch(url, {
             headers: {
                 Authorization: `Bearer ${installationToken}`,
                 Accept: 'application/vnd.github+json',
@@ -160,6 +176,26 @@ export async function getInstallationRepos(installationToken: string): Promise<G
 // ─── OAuth flow (unchanged — GitHub App uses same OAuth exchange) ─────────────
 
 /**
+ * fetch() with retries — the network to GitHub here is flaky (intermittent
+ * UND_ERR_CONNECT_TIMEOUT / socket closed). 3 attempts turns a ~1-in-3 failure
+ * into ~1-in-27, so a login doesn't die on a single dropped connection.
+ * ponytail: bump `attempts` if the link is worse; not a substitute for fixing the network.
+ */
+async function ghFetch(url: string, init: RequestInit, attempts = 3): Promise<Response> {
+    let lastErr: unknown;
+    for (let i = 1; i <= attempts; i++) {
+        try {
+            return await fetch(url, init);
+        } catch (err) {
+            lastErr = err;
+            console.warn(`[GitHub] fetch failed (attempt ${i}/${attempts}): ${url}`);
+            if (i < attempts) await new Promise(r => setTimeout(r, 1000 * i));
+        }
+    }
+    throw lastErr;
+}
+
+/**
  * Exchange OAuth authorization code for an access token.
  * Uses GitHub App CLIENT_ID/SECRET (was previously OAuth App credentials).
  */
@@ -177,7 +213,7 @@ export async function exchangeCodeForToken(code: string): Promise<GitHubTokenRes
     console.log('[GitHub] POST', GITHUB_OAUTH_URL);
     console.log('[GitHub] client_id:', clientId);
 
-    const response = await fetch(`${GITHUB_OAUTH_URL}?${params.toString()}`, {
+    const response = await ghFetch(`${GITHUB_OAUTH_URL}?${params.toString()}`, {
         method: 'POST',
         headers: { Accept: 'application/json' },
     });
@@ -212,7 +248,7 @@ export async function exchangeCodeForToken(code: string): Promise<GitHubTokenRes
 export async function getGitHubUser(accessToken: string): Promise<GitHubUser> {
     console.log('\n[GitHub] ── Fetching User Profile ───────────────────────');
 
-    const response = await fetch(`${GITHUB_API_BASE}/user`, {
+    const response = await ghFetch(`${GITHUB_API_BASE}/user`, {
         headers: {
             Authorization: `Bearer ${accessToken}`,
             Accept: 'application/vnd.github+json',
@@ -251,7 +287,7 @@ export async function getGitHubUserEmail(accessToken: string): Promise<string | 
     console.log('[GitHub] ── Fetching User Emails ────────────────────────');
 
     try {
-        const response = await fetch(`${GITHUB_API_BASE}/user/emails`, {
+        const response = await ghFetch(`${GITHUB_API_BASE}/user/emails`, {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
                 Accept: 'application/vnd.github+json',
@@ -282,44 +318,10 @@ export async function getGitHubUserEmail(accessToken: string): Promise<string | 
     }
 }
 
-/**
- * Check if the user has installed the GitHub App and return their installation ID.
- */
-export async function getUserAppInstallationId(accessToken: string): Promise<string | null> {
-    console.log('\n[GitHub App] ── Checking App Installations ──────────────');
-
-    try {
-        const response = await fetch(`${GITHUB_API_BASE}/user/installations`, {
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-                Accept: 'application/vnd.github+json',
-                'X-GitHub-Api-Version': '2022-11-28',
-                'User-Agent': 'Plutoploy/1.0',
-            },
-        });
-
-        if (!response.ok) {
-            console.warn(`[GitHub App] Failed to fetch installations: ${response.status}`);
-            return null;
-        }
-
-        const data = await response.json() as { installations: Array<{ id: number }> };
-        if (data.installations && data.installations.length > 0) {
-            const firstInstall = data.installations[0];
-            if (firstInstall) {
-                const installId = String(firstInstall.id);
-                console.log('[GitHub App] Found installation ID:', installId);
-                return installId;
-            }
-        }
-
-        console.log('[GitHub App] App not installed by user yet.');
-        return null;
-    } catch (err) {
-        console.error('[GitHub App] Error checking installations:', err);
-        return null;
-    }
-}
+// NOTE: removed getUserAppInstallationId(). GET /user/installations needs a
+// *GitHub App* user-to-server token, but login here uses a separate OAuth App
+// token, so it always returned 403. installation_id is captured via the Setup
+// URL redirect (/api/auth/github/setup) instead.
 
 /**
  * Build the GitHub App authorization URL.

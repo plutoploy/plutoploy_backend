@@ -48,7 +48,7 @@ app.route('/api/webhooks', webhookRoutes);
 // Mount deployment routes
 app.route('/api', deployRoutes);
 
-const port = parseInt(process.env.PORT || '3000');
+const port = parseInt(process.env.PORT || "6000" );
 
 export function startServer() {
   console.log('Initializing server...');

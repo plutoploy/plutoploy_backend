@@ -1,4 +1,5 @@
-node_modules
+# node_modules is copied in from the host on purpose — the build sandbox's route
+# to npmjs.org is unusably slow. See Dockerfile.
 .git
 .gitignore
 Dockerfile

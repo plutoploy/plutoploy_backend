@@ -4,8 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node --env-file=.env --import tsx/esm index.ts",
-    "dev": "node --env-file=.env --import tsx/esm index.ts",
+    "dev": "node --env-file=.env --watch --import tsx/esm index.ts",
     "build": "tsc",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:stop": "pm2 stop plutoploy",
@@ -16,7 +15,8 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:generate": "prisma generate",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "db:check": "node --env-file=.env --import tsx/esm scripts/db-check.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.11",
