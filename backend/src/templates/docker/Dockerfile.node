@@ -1,6 +1,13 @@
-FROM docker.io/oven/bun:latest
+# Vite/React static build → served by nginx on :80 (matches deploy's default containerPort).
+# ponytail: assumes a Vite app (`bun run build` → dist/). For CRA, change dist→build.
+# For a Node *server* app (Express/Next), this is wrong — that needs its own runtime template.
+FROM docker.io/oven/bun:latest AS build
 WORKDIR /app
 COPY . .
-RUN bun install
-EXPOSE 8001
-CMD ["bun", "run", "dev"]
+RUN bun install && bun run build
+
+FROM docker.io/library/nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+# SPA fallback: unknown paths → index.html so client-side routing works.
+RUN printf 'server {\n  listen 80;\n  root /usr/share/nginx/html;\n  location / { try_files $uri $uri/ /index.html; }\n}\n' > /etc/nginx/conf.d/default.conf
+EXPOSE 80

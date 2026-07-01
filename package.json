@@ -16,7 +16,10 @@
     "db:deploy": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
-    "db:check": "node --env-file=.env --import tsx/esm scripts/db-check.ts"
+    "db:check": "node --env-file=.env --import tsx/esm scripts/db-check.ts",
+    "db:status": "node --env-file=.env --import tsx/esm scripts/db-status.ts",
+    "db:cleanup": "node --env-file=.env --import tsx/esm scripts/db-cleanup.ts",
+    "db:reset": "node --env-file=.env --import tsx/esm scripts/db-reset.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.11",
