@@ -63,13 +63,15 @@ export const deploymentDb = {
 
 // Builds operations
 export const buildsDb = {
-    create: (build: { id: string; repo: string; branch: string; subdomain?: string }) =>
+    create: (build: { id: string; repo: string; branch: string; subdomain?: string; commitSha?: string; hostPort?: number }) =>
         prisma.build.create({
             data: {
                 id: build.id,
                 repo: build.repo,
                 branch: build.branch,
                 subdomain: build.subdomain ?? null,
+                commitSha: build.commitSha ?? null,
+                hostPort: build.hostPort ?? null,
                 status: 'queued',
             },
         }),
@@ -78,6 +80,11 @@ export const buildsDb = {
 
     getLatestByRepo: (repo: string) =>
         prisma.build.findFirst({ where: { repo }, orderBy: { createdAt: 'desc' } }),
+
+    // Match the build to its GitHub run by the commit our inject created
+    // (workflow_run.head_sha === that commit). Precise — no getLatestByRepo guessing.
+    getByCommitSha: (commitSha: string) =>
+        prisma.build.findFirst({ where: { commitSha }, orderBy: { createdAt: 'desc' } }),
 
     updateState: (id: string, status: string, githubRunId?: string) =>
         prisma.build.update({

@@ -38,7 +38,9 @@ model Build {
   id          String   @id
   repo        String
   branch      String
+  commitSha   String?  @map("commit_sha")
   githubRunId String?  @map("github_run_id")
+  hostPort    Int?     @map("host_port")
   status      String   @default("queued")
   subdomain   String?
   createdAt   DateTime @default(now()) @map("created_at")
